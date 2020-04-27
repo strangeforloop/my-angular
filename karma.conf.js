@@ -9,10 +9,11 @@ module.exports = function(config) {
       'test/**/*.js': ['jshint', 'browserify'],
       'src/**/*.js': ['jshint', 'browserify']
     },
-    browsers: ['Chrome', 'PhantomJS'],
+    browsers: ['PhantomJS'],
     browserify: {
       debug: true,
       bundleDelay: 2000
-    }
+    },
+    browserNoActivityTimeout: 10000
   })
 }
