@@ -9,6 +9,8 @@ function Scope() {
   this.$$applyAsyncQueue = [];
   this.$$applyAsyncId = null;
   this.$$postDigestQueue = [];
+  this.$root = this;
+  this.$$children = [];
   this.$$phase = null;
 }
 
@@ -46,14 +48,14 @@ Scope.prototype.$watch = function(watchFn, listenerFn, valueEq) {
     last: initWatchVal
   };
 
-  self.$$watchers.unshift(watcher); 
-  self.$$lastDirtyWatch = null; 
+  this.$$watchers.unshift(watcher); 
+  this.$root.$$lastDirtyWatch = null; 
 
   return function() {
     var index = self.$$watchers.indexOf(watcher);
     if (index >= 0) {
       self.$$watchers.splice(index, 1);
-      self.$$lastDirtyWatch = null;
+      self.$root.$$lastDirtyWatch = null;
     }
   };
 };
@@ -61,7 +63,7 @@ Scope.prototype.$watch = function(watchFn, listenerFn, valueEq) {
 Scope.prototype.$digest = function() {
   var ttl = 10;
   var dirty;
-  this.$$lastDirtyWatch = null;
+  this.$root.$$lastDirtyWatch = null;
   this.$beginPhase('$digest');
  
   if (this.$$applyAsyncId) {
@@ -95,33 +97,48 @@ Scope.prototype.$digest = function() {
   }
 };
 
+Scope.prototype.$$everyScope = function(fn) {
+  // invoke fn once for the current scope then recursively calls 
+  // everyScope children
+  if (fn(this)) {
+    return this.$$children.every(function(child) {
+      return child.$$everyScope(fn);
+    });
+  } else {
+    return false;
+  }
+};
+
 Scope.prototype.$$digestOnce = function() {
   var self = this;
-  var newValue; 
-  var oldValue;
-  var dirty; 
- 
-  _.forEachRight(this.$$watchers, function (watcher) {
-    try {
-      if (watcher) {
-        newValue = watcher.watchFn(self);
-        oldValue = watcher.last;
-        if (!self.$$areEqual(newValue, oldValue, watcher.valueEq)) {
-          self.$$lastDirtyWatch = watcher;
-          watcher.last = (watcher.valueEq ? _.cloneDeep(newValue) : newValue);
-          watcher.listenerFn(newValue,
-            (oldValue === initWatchVal ? newValue : oldValue),
-            self);
-          dirty = true;
-        } else if (self.$$lastDirtyWatch === watcher) {
-          return false; // short circuit eval
-        }
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  });
+  var continueLoop = true;
+  var dirty;
 
+  this.$$everyScope(function (scope) {
+    var newValue, oldValue;
+    _.forEachRight(scope.$$watchers, function (watcher) {
+      try {
+        if (watcher) {
+          newValue = watcher.watchFn(scope);
+          oldValue = watcher.last;
+          if (!scope.$$areEqual(newValue, oldValue, watcher.valueEq)) {
+            self.$root.$$lastDirtyWatch = watcher;
+            watcher.last = (watcher.valueEq ? _.cloneDeep(newValue) : newValue);
+            watcher.listenerFn(newValue,
+              (oldValue === initWatchVal ? newValue : oldValue),
+              scope);
+            dirty = true;
+          } else if (self.$root.$$lastDirtyWatch === watcher) {
+            continueLoop = false;
+            return false;
+          }
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    });
+    return continueLoop;
+  });
   return dirty;
 };
 
@@ -134,12 +151,13 @@ Scope.prototype.$eval = function(expr, locals) {
 Scope.prototype.$apply = function(expr) {
   try {
     this.$beginPhase('$apply');
-    return expr(this);
+    // return expr(this);
+    return this.$eval(expr);
   } finally {
     // finally block makes sure the digest will happen even if the
     // supplied function throws an exception
     this.$clearPhase();
-    this.$digest();
+    this.$root.$digest();
   }
 };
 
@@ -154,7 +172,7 @@ Scope.prototype.$evalAsync = function(expr) {
     // a digest
     setTimeout(function() {
       if (self.$$asyncQueue.length) {
-        self.$digest();
+        self.$root.$digest();
       }
     }, 0); 
   }
@@ -237,6 +255,22 @@ Scope.prototype.$watchGroup = function(watchFns, listenerFn) {
       destroyFunction();
     });
   };
+};
+
+// $new() creates a child scope for the current scope and returns it
+Scope.prototype.$new = function() {
+  // constructor
+  var ChildScope = function() { };
+
+  // set scope as the prototype of ChildScope
+  ChildScope.prototype = this;
+
+  // create a child scope object and return it
+  var child = new ChildScope();
+  this.$$children.push(child);
+  child.$$watchers = [];
+  child.$$children = [];
+  return child;
 };
 
 module.exports = Scope;
