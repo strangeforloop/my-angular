@@ -2,6 +2,8 @@
 
 var _ = require('lodash');
 
+function initWatchVal() { }
+
 function Scope() {
   this.$$watchers = [];
   this.$$lastDirtyWatch = null;
@@ -14,44 +16,56 @@ function Scope() {
   this.$$phase = null;
 }
 
-function initWatchVal() {}
-
-Scope.prototype.$$areEqual = function (newValue, oldValue, valueEq) {
-  if (valueEq) {
-    return _.isEqual(newValue, oldValue);
-  } else {
-    return newValue === oldValue ||
-      (typeof newValue === 'number' && typeof oldValue === 'number' &&
-        isNaN(newValue) && isNaN(oldValue));
-  }
-};
-
-Scope.prototype.$beginPhase = function(phase) {
+Scope.prototype.$beginPhase = function (phase) {
   if (this.$$phase) {
     throw this.$$phase + ' already in progress.';
   }
   this.$$phase = phase;
 };
 
-Scope.prototype.$clearPhase = function() {
+Scope.prototype.$clearPhase = function () {
   this.$$phase = null;
 };
 
-// watch registrations return removal functions
-Scope.prototype.$watch = function(watchFn, listenerFn, valueEq) {
-  var self = this;
+// $new() creates a child scope for the current scope and returns it
+Scope.prototype.$new = function (isolated, parent) {
+  var child;
+  parent = parent || this;
+  if (isolated) {
+    // child has an isolate scope
+    child = new Scope();
+    child.$root = parent.$root;
+    child.$$asyncQueue = parent.$$asyncQueue;
+    child.$$postDigestQueue = parent.$$postDigestQueue;
+    child.$$applyAsyncQueue = parent.$$applyAsyncQueue;
+  } else {
+    // constructor
+    var ChildScope = function () { };
+    // set scope as the prototype of ChildScope
+    ChildScope.prototype = this;
+    child = new ChildScope();
+  }
+  // // create a child scope object and return it
+  // var child = new ChildScope();
+  parent.$$children.push(child);
+  child.$$watchers = [];
+  child.$$children = [];
+  child.$parent = parent;
+  return child;
+};
 
+// watch registrations return removal functions
+Scope.prototype.$watch = function (watchFn, listenerFn, valueEq) {
+  var self = this;
   var watcher = {
     watchFn: watchFn,
-    listenerFn: listenerFn || function() {},
-    valueEq: !!valueEq,
-    last: initWatchVal
+    listenerFn: listenerFn || function () { },
+    last: initWatchVal,
+    valueEq: !!valueEq
   };
-
-  this.$$watchers.unshift(watcher); 
-  this.$root.$$lastDirtyWatch = null; 
-
-  return function() {
+  this.$$watchers.unshift(watcher);
+  this.$root.$$lastDirtyWatch = null;
+  return function () {
     var index = self.$$watchers.indexOf(watcher);
     if (index >= 0) {
       self.$$watchers.splice(index, 1);
@@ -60,16 +74,95 @@ Scope.prototype.$watch = function(watchFn, listenerFn, valueEq) {
   };
 };
 
-Scope.prototype.$digest = function() {
+Scope.prototype.$watchCollection = function(watchFn, listenerFn) {
+  var self = this;
+  var newValue;
+  var oldValue;
+  var changeCount = 0;
+
+  var internalWatchFn = function(scope){
+    newValue = watchFn(scope);
+
+    if (_.isObject(newValue)) {
+      if (_.isArray(newValue)) {
+
+      }
+    } else {
+      if (!self.$$areEqual(newValue, oldValue, false)) {
+        changeCount++;
+      }
+    }
+
+    oldValue = newValue;
+
+    return changeCount;
+  };
+
+  var internalListenerFn = function() {
+    listenerFn(newValue, oldValue, self);
+  };
+
+  return this.$watch(internalWatchFn, internalListenerFn);
+}
+
+Scope.prototype.$watchGroup = function (watchFns, listenerFn) {
+  var self = this;
+  var oldValues = new Array(watchFns.length);
+  var newValues = new Array(watchFns.length);
+  var changeReactionScheduled = false;
+  var firstRun = true;
+
+  if (watchFns.length === 0) {
+    var shouldCall = true;
+    self.$evalAsync(function () {
+      if (shouldCall) {
+        listenerFn(newValues, newValues, self);
+      }
+    });
+    return function () {
+      shouldCall = false;
+    };
+  }
+
+  function watchGroupListener() {
+    if (firstRun) {
+      firstRun = false;
+      listenerFn(newValues, newValues, self);
+    } else {
+      listenerFn(newValues, oldValues, self);
+    }
+    changeReactionScheduled = false;
+  }
+
+  var destroyFunctions = _.map(watchFns, function (watchFn, i) {
+    return self.$watch(watchFn, function (newValue, oldValue) {
+      newValues[i]  = newValue;
+      oldValues[i] = oldValue;
+      if (!changeReactionScheduled) {
+        changeReactionScheduled = true;
+        self.$evalAsync(watchGroupListener);
+      }
+    });
+  });
+
+  return function () {
+    _.forEach(destroyFunctions, function (destroyFunction) {
+      destroyFunction();
+    });
+  };
+};
+
+
+Scope.prototype.$digest = function () {
   var ttl = 10;
   var dirty;
   this.$root.$$lastDirtyWatch = null;
   this.$beginPhase('$digest');
- 
-  if (this.$$applyAsyncId) {
-    clearTimeout(this.$$applyAsyncId);
+
+  if (this.$root.$$applyAsyncId) {
+    clearTimeout(this.$root.$$applyAsyncId);
     this.$$flushApplyAsync();
-  } 
+  }
 
   do {
     while (this.$$asyncQueue.length) {
@@ -82,7 +175,6 @@ Scope.prototype.$digest = function() {
     }
     dirty = this.$$digestOnce();
     if ((dirty || this.$$asyncQueue.length) && !(ttl--)) {
-      this.$clearPhase();
       throw '10 digest iterations reached';
     }
   } while (dirty || this.$$asyncQueue.length);
@@ -97,23 +189,9 @@ Scope.prototype.$digest = function() {
   }
 };
 
-Scope.prototype.$$everyScope = function(fn) {
-  // invoke fn once for the current scope then recursively calls 
-  // everyScope children
-  if (fn(this)) {
-    return this.$$children.every(function(child) {
-      return child.$$everyScope(fn);
-    });
-  } else {
-    return false;
-  }
-};
-
-Scope.prototype.$$digestOnce = function() {
-  var self = this;
-  var continueLoop = true;
+Scope.prototype.$$digestOnce = function () {
   var dirty;
-
+  var continueLoop = true;
   this.$$everyScope(function (scope) {
     var newValue, oldValue;
     _.forEachRight(scope.$$watchers, function (watcher) {
@@ -122,13 +200,11 @@ Scope.prototype.$$digestOnce = function() {
           newValue = watcher.watchFn(scope);
           oldValue = watcher.last;
           if (!scope.$$areEqual(newValue, oldValue, watcher.valueEq)) {
-            self.$root.$$lastDirtyWatch = watcher;
+            scope.$root.$$lastDirtyWatch = watcher;
             watcher.last = (watcher.valueEq ? _.cloneDeep(newValue) : newValue);
-            watcher.listenerFn(newValue,
-              (oldValue === initWatchVal ? newValue : oldValue),
-              scope);
+            watcher.listenerFn(newValue, (oldValue === initWatchVal ? newValue : oldValue), scope);
             dirty = true;
-          } else if (self.$root.$$lastDirtyWatch === watcher) {
+          } else if (scope.$root.$$lastDirtyWatch === watcher) {
             continueLoop = false;
             return false;
           }
@@ -142,13 +218,35 @@ Scope.prototype.$$digestOnce = function() {
   return dirty;
 };
 
-Scope.prototype.$eval = function(expr, locals) {
+Scope.prototype.$$areEqual = function (newValue, oldValue, valueEq) {
+  if (valueEq) {
+    return _.isEqual(newValue, oldValue);
+  } else {
+    return newValue === oldValue ||
+      (typeof newValue === 'number' && typeof oldValue === 'number' &&
+        isNaN(newValue) && isNaN(oldValue));
+  }
+};
+
+// invoke fn once for the current scope then recursively calls 
+// everyScope children
+Scope.prototype.$$everyScope = function (fn) {
+  if (fn(this)) {
+    return this.$$children.every(function (child) {
+      return child.$$everyScope(fn);
+    });
+  } else {
+    return false;
+  }
+};
+
+Scope.prototype.$eval = function (expr, locals) {
   return expr(this, locals);
 };
 
 // basically makes it possible to execute some code that isn't
 // aware of Angular's digest cycle
-Scope.prototype.$apply = function(expr) {
+Scope.prototype.$apply = function (expr) {
   try {
     this.$beginPhase('$apply');
     // return expr(this);
@@ -161,34 +259,21 @@ Scope.prototype.$apply = function(expr) {
   }
 };
 
-Scope.prototype.$evalAsync = function(expr) {
+Scope.prototype.$evalAsync = function (expr) {
   var self = this;
-
   if (!self.$$phase && !self.$$asyncQueue.length) {
     // ensure the function returns immediately rather than evaluating
     // the expression synchronously regardless of status of the 
     // digest cycle
     // prevents confusion if someone calls $evalAsync from outside 
     // a digest
-    setTimeout(function() {
+    setTimeout(function () {
       if (self.$$asyncQueue.length) {
         self.$root.$digest();
       }
-    }, 0); 
+    }, 0);
   }
-
-  self.$$asyncQueue.push({ scope: self, expression: expr });
-};
-
-Scope.prototype.$$flushApplyAsync = function () {
-  while (this.$$applyAsyncQueue.length) {
-    try {
-      this.$$applyAsyncQueue.shift()();
-    } catch (e) {
-      console.log(e);
-    }
-  }
-  this.$$applyAsyncId = null;
+  this.$$asyncQueue.push({ scope: this, expression: expr });
 };
 
 Scope.prototype.$applyAsync = function (expr) {
@@ -196,81 +281,40 @@ Scope.prototype.$applyAsync = function (expr) {
   self.$$applyAsyncQueue.push(function () {
     self.$eval(expr);
   });
-
-  if (self.$$applyAsyncId === null) {
+  if (self.$root.$$applyAsyncId === null) {
     // schedules the function application. in the timeout, $apply a function that drains the queue and invokes functions in it
-    self.$$applyAsyncId = setTimeout(function () {
+    self.$root.$$applyAsyncId = setTimeout(function () {
       self.$apply(_.bind(self.$$flushApplyAsync, self));
     }, 0);
   }
 };
 
-Scope.prototype.$$postDigest = function(fn) {
+Scope.prototype.$$flushApplyAsync = function () {
+  while (this.$$applyAsyncQueue.length) {
+    try {
+      this.$$applyAsyncQueue.shift()();
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  this.$root.$$applyAsyncId = null;
+};
+
+Scope.prototype.$$postDigest = function (fn) {
   this.$$postDigestQueue.push(fn);
 };
 
-Scope.prototype.$watchGroup = function(watchFns, listenerFn) {
-  var self = this;
-  var newValues = new Array(watchFns.length);
-  var oldValues = new Array(watchFns.length);
-  var changeReactionScheduled = false;
-  var firstRun = true;
-
-  if (watchFns.length === 0) {
-    var shouldCall = true;
-    
-    self.$evalAsync(function () {
-      if (shouldCall) {
-        listenerFn(newValues, newValues, self);
-      }
-    });
-    return function() {
-      shouldCall = false;
-    };
-  } 
-
-  function watchGroupListener() {
-    if (firstRun) {
-      firstRun = false;
-      listenerFn(newValues, newValues, self);
-    } else {
-      listenerFn(newValues, oldValues, self);
+// remove current scope and watchers of scope from parent's 
+// children array as long as not root scope
+Scope.prototype.$destroy = function () {
+  if (this.$parent) {
+    var siblings = this.$parent.$$children;
+    var indexOfThis = siblings.indexOf(this);
+    if (indexOfThis >= 0) {
+      siblings.splice(indexOfThis, 1);
     }
-    changeReactionScheduled = false;
   }
-
-  var destroyFunctions = _.map(watchFns, function (watchFn, i) {
-    return self.$watch(watchFn, function (newValue, oldValue) {
-      newValues[i] = newValue;
-      oldValues[i] = oldValue;
-      if (!changeReactionScheduled) {
-        changeReactionScheduled = true;
-        self.$evalAsync(watchGroupListener);
-      }
-    });
-  });
-
-  return function() {
-    _.forEach(destroyFunctions, function(destroyFunction) {
-      destroyFunction();
-    });
-  };
-};
-
-// $new() creates a child scope for the current scope and returns it
-Scope.prototype.$new = function() {
-  // constructor
-  var ChildScope = function() { };
-
-  // set scope as the prototype of ChildScope
-  ChildScope.prototype = this;
-
-  // create a child scope object and return it
-  var child = new ChildScope();
-  this.$$children.push(child);
-  child.$$watchers = [];
-  child.$$children = [];
-  return child;
+  this.$$watchers = null;
 };
 
 module.exports = Scope;
