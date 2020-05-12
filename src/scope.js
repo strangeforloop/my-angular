@@ -74,6 +74,16 @@ Scope.prototype.$watch = function (watchFn, listenerFn, valueEq) {
   };
 };
 
+// my own isArrayLike because lodash isArray doesn't handle
+// array-like objects
+function isArrayLike(obj) {
+  if (_.isNull(obj) || _.isUndefined(obj)) {
+    return false;
+  }
+  var length = obj.length;
+  return _.isNumber(length);
+}
+
 Scope.prototype.$watchCollection = function(watchFn, listenerFn) {
   var self = this;
   var newValue;
@@ -84,17 +94,34 @@ Scope.prototype.$watchCollection = function(watchFn, listenerFn) {
     newValue = watchFn(scope);
 
     if (_.isObject(newValue)) {
-      if (_.isArray(newValue)) {
-
+      if (isArrayLike(newValue)) {
+        if (!_.isArray(oldValue)) {
+          changeCount++;
+          oldValue = [];
+        }
+        if (newValue.length !== oldValue.length) {
+          changeCount++;
+          oldValue.length = newValue.length;
+        } 
+        _.forEach(newValue, function(newItem, i) {
+          var bothNaN = _.isNaN(newItem) && _.isNaN(oldValue[i]);
+          if (!bothNaN && newItem !== oldValue[i]) {
+            changeCount++;
+            oldValue[i] = newItem;
+          }
+        });
+      } else {
+        if (!_.isObject(oldValue) || isArrayLike(oldValue)) {
+          changeCount++;
+          oldValue = {};
+        }
       }
     } else {
       if (!self.$$areEqual(newValue, oldValue, false)) {
         changeCount++;
       }
+      oldValue = newValue;
     }
-
-    oldValue = newValue;
-
     return changeCount;
   };
 
@@ -103,7 +130,7 @@ Scope.prototype.$watchCollection = function(watchFn, listenerFn) {
   };
 
   return this.$watch(internalWatchFn, internalListenerFn);
-}
+};
 
 Scope.prototype.$watchGroup = function (watchFns, listenerFn) {
   var self = this;
